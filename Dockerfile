@@ -1,7 +1,4 @@
-# Smallest base image, latests stable image
-# Alpine would be nice, but it's linked again musl and breaks the bitcoin core download binary
-#FROM alpine:latest
-
+# Use the official latest Ubuntu as a base image
 FROM ubuntu:latest AS builder
 ARG TARGETARCH
 
@@ -14,25 +11,35 @@ ENV ARCH=riscv64
 
 FROM builder_${TARGETARCH} AS build
 
-# Testing: gosu
-#RUN echo "http://dl-cdn.alpinelinux.org/alpine/edge/testing/" >> /etc/apk/repositories \
-#    && apk add --update --no-cache gnupg gosu gcompat libgcc
-RUN apt update \
-    && apt install -y --no-install-recommends \
-    ca-certificates \
+# Update the system and install necessary dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    build-essential \
     gnupg \
     libatomic1 \
     wget \
-    && apt clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Clone the repository
+RUN git clone https://github.com/crypticmeta/ord.git /app
+
+# Set the working directory
+WORKDIR /app
+
+# Checkout the ordapi branch
+RUN git checkout ordapi
+
+# Build the application
+RUN cargo build --release
 
 ARG VERSION=25.0
 ARG BITCOIN_CORE_SIGNATURE=71A3B16735405025D447E8F274810B012346C9A6
 
-# Don't use base image's bitcoin package for a few reasons:
-# 1. Would need to use ppa/latest repo for the latest release.
-# 2. Some package generates /etc/bitcoin.conf on install and that's dangerous to bake in with Docker Hub.
-# 3. Verifying pkg signature from main website should inspire confidence and reduce chance of surprises.
-# Instead fetch, verify, and extract to Docker image
 RUN cd /tmp \
     && gpg --keyserver hkp://keyserver.ubuntu.com --recv-keys ${BITCOIN_CORE_SIGNATURE} \
     && wget https://bitcoincore.org/bin/bitcoin-core-${VERSION}/SHA256SUMS.asc \
@@ -46,20 +53,21 @@ RUN cd /tmp \
     && rm -v /opt/bitcoin/bin/test_bitcoin /opt/bitcoin/bin/bitcoin-qt
 
 FROM ubuntu:latest
-LABEL maintainer="Kyle Manna <kyle@kylemanna.com>"
+LABEL maintainer="Crypticmeta <crypticmetadev@gmail.com>"
 
 ENTRYPOINT ["docker-entrypoint.sh"]
-ENV HOME /bitcoin
+ENV HOME /app
 EXPOSE 8332 8333
-VOLUME ["/bitcoin/.bitcoin"]
-WORKDIR /bitcoin
+VOLUME ["/app"]
+WORKDIR /app
 
 ARG GROUP_ID=1000
 ARG USER_ID=1000
 RUN groupadd -g ${GROUP_ID} bitcoin \
-    && useradd -u ${USER_ID} -g bitcoin -d /bitcoin bitcoin
+    && useradd -u ${USER_ID} -g bitcoin -d /app bitcoin
 
 COPY --from=build /opt/ /opt/
+COPY --from=build /app/target/release /app/target/release
 
 RUN apt update \
     && apt install -y --no-install-recommends gosu libatomic1 \
@@ -67,5 +75,12 @@ RUN apt update \
     && ln -sv /opt/bitcoin/bin/* /usr/local/bin
 
 COPY ./bin ./docker-entrypoint.sh /usr/local/bin/
+COPY bitcoin.conf $HOME/.bitcoin/bitcoin.conf  
+# Add this line to copy the bitcoin.conf file
 
-CMD ["btc_oneshot"]
+RUN chown -R bitcoin:bitcoin $HOME/.bitcoin  
+# Set ownership for the bitcoin.conf file
+RUN chmod 600 $HOME/.bitcoin/bitcoin.conf  
+# Set permissions for the bitcoin.conf file
+
+CMD ["bitcoind"]
